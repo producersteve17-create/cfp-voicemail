@@ -50,7 +50,8 @@
             font-size: 16px;
             box-sizing: border-box;
         }
-        button {
+        button, .upload-btn {
+            display: inline-block;
             padding: 15px 30px;
             font-size: 18px;
             font-weight: bold;
@@ -59,27 +60,36 @@
             cursor: pointer;
             margin: 10px;
             transition: opacity 0.2s;
+            box-sizing: border-box;
+            text-decoration: none;
         }
-        button:active {
+        button:active, .upload-btn:active {
             transform: scale(0.98);
         }
         button:disabled {
             opacity: 0.5;
             cursor: not-allowed;
         }
-        #recordBtn {
-            background-color: #f28224; 
-            color: white;
+        
+        #recordBtn { background-color: #f28224; color: white; }
+        .upload-btn { background-color: #00a8e1; color: #021431; }
+        #stopBtn { background-color: #ffc000; color: #021431; }
+        #submitBtn { background-color: #f28224; color: white; width: 100%; margin: 10px 0; }
+        #discardBtn { background-color: #666; color: white; width: 100%; margin: 10px 0; }
+        
+        #status { margin-top: 20px; font-weight: bold; color: #00a8e1; min-height: 24px; }
+        
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
         }
-        #stopBtn {
-            background-color: #ffc000; 
-            color: #021431;
-        }
-        #status {
-            margin-top: 20px;
-            font-weight: bold;
-            color: #00a8e1; 
-            min-height: 24px;
+        .recording-indicator {
+            color: #ffc000; 
+            font-weight: bold; 
+            animation: pulse 1.5s infinite; 
+            margin-bottom: 15px; 
+            font-size: 1.2em;
         }
     </style>
 </head>
@@ -88,16 +98,32 @@
 <div class="container" id="uiContent">
     <img src="cfp.jpg" alt="Culture Faith and Politics" class="logo">
     <h1>Leave a voicemail for Pat!</h1>
-    <p class="subtitle">Hit record, speak your mind, and submit.</p>
+    <p class="subtitle">Record a message or upload an audio file.</p>
     
     <input type="text" id="userName" placeholder="Your Name (Optional)" />
     
-    <div>
-        <button id="recordBtn">Start Recording</button>
-        <button id="stopBtn" disabled>Stop & Submit</button>
+    <!-- Phase 1: Action Selection -->
+    <div id="actionArea">
+        <button id="recordBtn">Record Message</button>
+        <p style="margin: 10px 0; font-weight: bold; color: #ccc;">or</p>
+        <label for="fileUpload" class="upload-btn">Upload Audio File</label>
+        <input type="file" id="fileUpload" accept="audio/*" style="display: none;" />
     </div>
     
-    <p id="status">Ready to record.</p>
+    <!-- Phase 2: Active Recording -->
+    <div id="recordingArea" style="display: none;">
+        <p class="recording-indicator">Recording... Speak now.</p>
+        <button id="stopBtn">Stop Recording</button>
+    </div>
+    
+    <!-- Phase 3: Review & Submit -->
+    <div id="reviewArea" style="display: none;">
+        <audio id="audioPlayback" controls style="width: 100%; margin-bottom: 15px;"></audio>
+        <button id="submitBtn">Submit Voicemail</button>
+        <button id="discardBtn">Discard and Start Over</button>
+    </div>
+    
+    <p id="status">Ready to record or upload.</p>
 </div>
 
 <script>
@@ -107,11 +133,22 @@
     let mediaRecorder;
     let audioChunks = [];
     let wakeLock = null;
+    let finalPayloadData = null; 
+    let finalMimeType = null;
+    
+    const actionArea = document.getElementById('actionArea');
+    const recordingArea = document.getElementById('recordingArea');
+    const reviewArea = document.getElementById('reviewArea');
     
     const recordBtn = document.getElementById('recordBtn');
+    const fileUpload = document.getElementById('fileUpload');
     const stopBtn = document.getElementById('stopBtn');
+    const submitBtn = document.getElementById('submitBtn');
+    const discardBtn = document.getElementById('discardBtn');
+    
     const statusText = document.getElementById('status');
     const userNameInput = document.getElementById('userName');
+    const audioPlayback = document.getElementById('audioPlayback');
 
     function canSubmit() {
         const lastSub = localStorage.getItem('lastVoicemailTime');
@@ -138,6 +175,18 @@
         }
     }
 
+    function resetUI() {
+        actionArea.style.display = 'block';
+        recordingArea.style.display = 'none';
+        reviewArea.style.display = 'none';
+        statusText.innerText = "Ready to record or upload.";
+        statusText.style.color = "#00a8e1";
+        finalPayloadData = null;
+        finalMimeType = null;
+        audioPlayback.src = "";
+        fileUpload.value = "";
+    }
+
     recordBtn.addEventListener('click', async () => {
         if (!canSubmit()) {
             statusText.innerText = "Please wait a few minutes before submitting another voicemail.";
@@ -156,15 +205,14 @@
                 }
             };
 
-            mediaRecorder.onstop = processAudio;
+            mediaRecorder.onstop = prepareReview;
 
             mediaRecorder.start();
             await requestWakeLock();
             
-            recordBtn.disabled = true;
-            stopBtn.disabled = false;
-            statusText.innerText = "Recording... Speak now.";
-            statusText.style.color = "#ffc000"; 
+            actionArea.style.display = 'none';
+            recordingArea.style.display = 'block';
+            statusText.innerText = "";
         } catch (err) {
             statusText.innerText = "Microphone access denied or unavailable.";
             statusText.style.color = "red";
@@ -177,70 +225,113 @@
         mediaRecorder.stream.getTracks().forEach(track => track.stop()); 
         await releaseWakeLock();
         
-        recordBtn.disabled = false;
-        stopBtn.disabled = true;
+        recordingArea.style.display = 'none';
         statusText.innerText = "Processing audio...";
         statusText.style.color = "#00a8e1";
     });
 
-    function processAudio() {
-        let cleanMimeType = mediaRecorder.mimeType.split(';')[0];
-        const audioBlob = new Blob(audioChunks, { type: cleanMimeType });
+    function prepareReview() {
+        finalMimeType = mediaRecorder.mimeType.split(';')[0];
+        const audioBlob = new Blob(audioChunks, { type: finalMimeType });
         
         if (audioBlob.size > 10485760) {
             statusText.innerText = "Error: Recording is too long (over 10MB). Please record a shorter message.";
             statusText.style.color = "red";
+            resetUI();
             return;
         }
 
         const reader = new FileReader();
         reader.readAsDataURL(audioBlob);
         reader.onloadend = () => {
-            const base64Data = reader.result;
-            const userName = userNameInput.value.trim() || "Anonymous";
-            
-            const payload = {
-                audioData: base64Data,
-                mimeType: cleanMimeType,
-                secretKey: hiddenSecretKey, 
-                fileName: "CFP_Voicemail_" + userName.replace(/[^a-zA-Z0-9]/g, "_"),
-                userNote: "Voicemail from: " + userName
-            };
-
-            statusText.innerText = "Uploading to Google Drive...";
-
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 30000); 
-
-            fetch(webAppUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'text/plain' 
-                },
-                body: JSON.stringify(payload),
-                signal: controller.signal
-            })
-            .then(response => response.json())
-            .then(data => {
-                clearTimeout(timeoutId);
-                if (data.status === 'success') {
-                    statusText.innerText = "Voicemail submitted successfully!";
-                    statusText.style.color = "#00a8e1";
-                    userNameInput.value = "";
-                    localStorage.setItem('lastVoicemailTime', Date.now().toString());
-                } else {
-                    statusText.innerText = "Error: " + (data.message || "Upload failed.");
-                    statusText.style.color = "red";
-                }
-            })
-            .catch(err => {
-                clearTimeout(timeoutId);
-                statusText.innerText = "Error uploading file. Please try again.";
-                statusText.style.color = "red";
-                console.error("Upload error:", err);
-            });
+            finalPayloadData = reader.result;
+            audioPlayback.src = finalPayloadData;
+            reviewArea.style.display = 'block';
+            statusText.innerText = "Review your recording before submitting.";
         };
     }
+
+    fileUpload.addEventListener('change', (event) => {
+        const file = event.target.files[0];
+        if (!file) return;
+        
+        if (file.size > 10485760) {
+            statusText.innerText = "Error: File is larger than the 10MB limit.";
+            statusText.style.color = "red";
+            fileUpload.value = "";
+            return;
+        }
+
+        finalMimeType = file.type || 'audio/mp3'; 
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onloadend = () => {
+            finalPayloadData = reader.result;
+            audioPlayback.src = finalPayloadData;
+            actionArea.style.display = 'none';
+            reviewArea.style.display = 'block';
+            statusText.innerText = "Review your uploaded file before submitting.";
+            statusText.style.color = "#00a8e1";
+        };
+    });
+
+    discardBtn.addEventListener('click', resetUI);
+
+    submitBtn.addEventListener('click', () => {
+        if (!finalPayloadData) return;
+
+        const userName = userNameInput.value.trim() || "Anonymous";
+        const payload = {
+            audioData: finalPayloadData,
+            mimeType: finalMimeType,
+            secretKey: hiddenSecretKey, 
+            fileName: "CFP_Voicemail_" + userName.replace(/[^a-zA-Z0-9]/g, "_"),
+            userNote: "Voicemail from: " + userName
+        };
+
+        submitBtn.disabled = true;
+        discardBtn.disabled = true;
+        statusText.innerText = "Uploading to Google Drive...";
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 30000); 
+
+        fetch(webAppUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'text/plain' 
+            },
+            body: JSON.stringify(payload),
+            signal: controller.signal
+        })
+        .then(response => response.json())
+        .then(data => {
+            clearTimeout(timeoutId);
+            if (data.status === 'success') {
+                statusText.innerText = "Voicemail submitted successfully!";
+                statusText.style.color = "#00a8e1";
+                userNameInput.value = "";
+                localStorage.setItem('lastVoicemailTime', Date.now().toString());
+                
+                setTimeout(() => {
+                    resetUI();
+                }, 4000);
+            } else {
+                statusText.innerText = "Error: " + (data.message || "Upload failed.");
+                statusText.style.color = "red";
+            }
+        })
+        .catch(err => {
+            clearTimeout(timeoutId);
+            statusText.innerText = "Error uploading file. Please try again.";
+            statusText.style.color = "red";
+            console.error("Upload error:", err);
+        })
+        .finally(() => {
+            submitBtn.disabled = false;
+            discardBtn.disabled = false;
+        });
+    });
 </script>
 </body>
 </html>
