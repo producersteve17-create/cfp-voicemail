@@ -1,1 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Leave a Voicemail for Pat</title>
+    <style>
+        body {
+            background-color: #021431; /* Navy background matching the logo */
+            color: white;
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .container {
+            max-width: 600px;
+            width: 100%;
+            background: #04214f;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            margin-top: 20px;
+            box-sizing: border-box;
+        }
+        img.logo {
+            max-width: 100%;
+            height: auto;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        h1 {
+            color: #f28224; /* Orange accent */
+            margin-bottom: 10px;
+        }
+        p.subtitle {
+            color: #00a8e1; /* Cyan accent */
+            font-size: 1.1em;
+            margin-bottom: 25px;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 12px;
+            margin-bottom: 20px;
+            border-radius: 6px;
+            border: 1px solid #ccc;
+            font-size: 16px;
+            box-sizing: border-box;
+        }
+        button {
+            padding: 15px 30px;
+            font-size: 18px;
+            font-weight: bold;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            margin: 10px;
+            transition: opacity 0.2s;
+        }
+        button:active {
+            transform: scale(0.98);
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        #recordBtn {
+            background-color: #f28224; /* Orange */
+            color: white;
+        }
+        #stopBtn {
+            background-color: #ffc000; /* Yellow */
+            color: #021431;
+        }
+        #status {
+            margin-top: 20px;
+            font-weight: bold;
+            color: #00a8e1; /* Cyan */
+            min-height: 24px;
+        }
+    </style>
+</head>
+<body>
 
+<div class="container">
+    <img src="cfp.jpg" alt="Culture Faith and Politics" class="logo">
+    <h1>Leave a voicemail for Pat!</h1>
+    <p class="subtitle">Hit record, speak your mind, and submit.</p>
+    
+    <input type="text" id="userName" placeholder="Your Name (Optional)" />
+    
+    <div>
+        <button id="recordBtn">Start Recording</button>
+        <button id="stopBtn" disabled>Stop & Submit</button>
+    </div>
+    
+    <p id="status">Ready to record.</p>
+</div>
+
+<script>
+    const webAppUrl = "https://script.google.com/macros/s/AKfycbyZhldJg05Z3014bwi7DxaJz880e566yQb0njGMrP4zC2nDeU9CJ3zLQrbtyoNTG9HWJA/exec";
+    const secretKey = "TEST_SECRET_KEY"; // Must match the backend script
+    
+    let mediaRecorder;
+    let audioChunks = [];
+    
+    const recordBtn = document.getElementById('recordBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const statusText = document.getElementById('status');
+    const userNameInput = document.getElementById('userName');
+
+    recordBtn.addEventListener('click', async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaRecorder = new MediaRecorder(stream);
+            audioChunks = [];
+
+            mediaRecorder.ondataavailable = event => {
+                if (event.data.size > 0) {
+                    audioChunks.push(event.data);
+                }
+            };
+
+            mediaRecorder.onstop = processAudio;
+
+            mediaRecorder.start();
+            recordBtn.disabled = true;
+            stopBtn.disabled = false;
+            statusText.innerText = "Recording... Speak now.";
+            statusText.style.color = "#ffc000"; 
+        } catch (err) {
+            statusText.innerText = "Microphone access denied or unavailable.";
+            statusText.style.color = "red";
+            console.error("Mic error:", err);
+        }
+    });
+
+    stopBtn.addEventListener('click', () => {
+        mediaRecorder.stop();
+        mediaRecorder.stream.getTracks().forEach(track => track.stop()); // Release the microphone
+        recordBtn.disabled = false;
+        stopBtn.disabled = true;
+        statusText.innerText = "Processing audio...";
+        statusText.style.color = "#00a8e1";
+    });
+
+    function processAudio() {
+        const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
+        const reader = new FileReader();
+        
+        reader.readAsDataURL(audioBlob);
+        reader.onloadend = () => {
+            const base64Data = reader.result;
+            const userName = userNameInput.value.trim() || "Anonymous";
+            
+            const payload = {
+                audioData: base64Data,
+                mimeType: audioBlob.type,
+                secretKey: secretKey,
+                fileName: "CFP_Voicemail_" + userName.replace(/[^a-zA-Z0-9]/g, "_"),
+                userNote: "Voicemail from: " + userName
+            };
+
+            statusText.innerText = "Uploading to Google Drive...";
+
+            fetch(webAppUrl, {
+                method: 'POST',
+                mode: 'no-cors', // Bypasses strict CORS for Google Apps Script handoff
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+            .then(() => {
+                statusText.innerText = "Voicemail submitted successfully!";
+                statusText.style.color = "#00a8e1";
+                userNameInput.value = "";
+            })
+            .catch(err => {
+                statusText.innerText = "Error uploading file. Please try again.";
+                statusText.style.color = "red";
+                console.error("Upload error:", err);
+            });
+        };
+    }
+</script>
+</body>
+</html>
