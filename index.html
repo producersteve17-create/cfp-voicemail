@@ -6,7 +6,7 @@
     <title>Leave a Voicemail for Pat</title>
     <style>
         body {
-            background-color: #021431; /* Navy background matching the logo */
+            background-color: #021431; 
             color: white;
             font-family: Arial, sans-serif;
             text-align: center;
@@ -33,11 +33,11 @@
             border-radius: 4px;
         }
         h1 {
-            color: #f28224; /* Orange accent */
+            color: #f28224; 
             margin-bottom: 10px;
         }
         p.subtitle {
-            color: #00a8e1; /* Cyan accent */
+            color: #00a8e1; 
             font-size: 1.1em;
             margin-bottom: 25px;
         }
@@ -68,24 +68,24 @@
             cursor: not-allowed;
         }
         #recordBtn {
-            background-color: #f28224; /* Orange */
+            background-color: #f28224; 
             color: white;
         }
         #stopBtn {
-            background-color: #ffc000; /* Yellow */
+            background-color: #ffc000; 
             color: #021431;
         }
         #status {
             margin-top: 20px;
             font-weight: bold;
-            color: #00a8e1; /* Cyan */
+            color: #00a8e1; 
             min-height: 24px;
         }
     </style>
 </head>
 <body>
 
-<div class="container">
+<div class="container" id="uiContent">
     <img src="cfp.jpg" alt="Culture Faith and Politics" class="logo">
     <h1>Leave a voicemail for Pat!</h1>
     <p class="subtitle">Hit record, speak your mind, and submit.</p>
@@ -102,17 +102,49 @@
 
 <script>
     const webAppUrl = "https://script.google.com/macros/s/AKfycbyZhldJg05Z3014bwi7DxaJz880e566yQb0njGMrP4zC2nDeU9CJ3zLQrbtyoNTG9HWJA/exec";
-    const secretKey = "TEST_SECRET_KEY"; // Must match the backend script
+    const hiddenSecretKey = "TEST_SECRET_KEY";
     
     let mediaRecorder;
     let audioChunks = [];
+    let wakeLock = null;
     
     const recordBtn = document.getElementById('recordBtn');
     const stopBtn = document.getElementById('stopBtn');
     const statusText = document.getElementById('status');
     const userNameInput = document.getElementById('userName');
 
+    function canSubmit() {
+        const lastSub = localStorage.getItem('lastVoicemailTime');
+        if (lastSub && (Date.now() - lastSub < 300000)) {
+            return false;
+        }
+        return true;
+    }
+
+    async function requestWakeLock() {
+        try {
+            if ('wakeLock' in navigator) {
+                wakeLock = await navigator.wakeLock.request('screen');
+            }
+        } catch (err) {
+            console.log("Wake Lock error:", err);
+        }
+    }
+
+    async function releaseWakeLock() {
+        if (wakeLock !== null) {
+            await wakeLock.release();
+            wakeLock = null;
+        }
+    }
+
     recordBtn.addEventListener('click', async () => {
+        if (!canSubmit()) {
+            statusText.innerText = "Please wait a few minutes before submitting another voicemail.";
+            statusText.style.color = "red";
+            return;
+        }
+
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             mediaRecorder = new MediaRecorder(stream);
@@ -127,6 +159,8 @@
             mediaRecorder.onstop = processAudio;
 
             mediaRecorder.start();
+            await requestWakeLock();
+            
             recordBtn.disabled = true;
             stopBtn.disabled = false;
             statusText.innerText = "Recording... Speak now.";
@@ -138,9 +172,11 @@
         }
     });
 
-    stopBtn.addEventListener('click', () => {
+    stopBtn.addEventListener('click', async () => {
         mediaRecorder.stop();
-        mediaRecorder.stream.getTracks().forEach(track => track.stop()); // Release the microphone
+        mediaRecorder.stream.getTracks().forEach(track => track.stop()); 
+        await releaseWakeLock();
+        
         recordBtn.disabled = false;
         stopBtn.disabled = true;
         statusText.innerText = "Processing audio...";
@@ -148,9 +184,16 @@
     });
 
     function processAudio() {
-        const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
-        const reader = new FileReader();
+        let cleanMimeType = mediaRecorder.mimeType.split(';')[0];
+        const audioBlob = new Blob(audioChunks, { type: cleanMimeType });
         
+        if (audioBlob.size > 10485760) {
+            statusText.innerText = "Error: Recording is too long (over 10MB). Please record a shorter message.";
+            statusText.style.color = "red";
+            return;
+        }
+
+        const reader = new FileReader();
         reader.readAsDataURL(audioBlob);
         reader.onloadend = () => {
             const base64Data = reader.result;
@@ -158,26 +201,40 @@
             
             const payload = {
                 audioData: base64Data,
-                mimeType: audioBlob.type,
-                secretKey: secretKey,
+                mimeType: cleanMimeType,
+                secretKey: hiddenSecretKey, 
                 fileName: "CFP_Voicemail_" + userName.replace(/[^a-zA-Z0-9]/g, "_"),
                 userNote: "Voicemail from: " + userName
             };
 
             statusText.innerText = "Uploading to Google Drive...";
 
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 30000); 
+
             fetch(webAppUrl, {
                 method: 'POST',
-                mode: 'no-cors', // Bypasses strict CORS for Google Apps Script handoff
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
+                headers: {
+                    'Content-Type': 'text/plain' 
+                },
+                body: JSON.stringify(payload),
+                signal: controller.signal
             })
-            .then(() => {
-                statusText.innerText = "Voicemail submitted successfully!";
-                statusText.style.color = "#00a8e1";
-                userNameInput.value = "";
+            .then(response => response.json())
+            .then(data => {
+                clearTimeout(timeoutId);
+                if (data.status === 'success') {
+                    statusText.innerText = "Voicemail submitted successfully!";
+                    statusText.style.color = "#00a8e1";
+                    userNameInput.value = "";
+                    localStorage.setItem('lastVoicemailTime', Date.now().toString());
+                } else {
+                    statusText.innerText = "Error: " + (data.message || "Upload failed.");
+                    statusText.style.color = "red";
+                }
             })
             .catch(err => {
+                clearTimeout(timeoutId);
                 statusText.innerText = "Error uploading file. Please try again.";
                 statusText.style.color = "red";
                 console.error("Upload error:", err);
