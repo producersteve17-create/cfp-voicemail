@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Leave a Voicemail for Pat</title>
+    <!-- LameJS for client-side MP3 encoding -->
+    <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
     <style>
         body {
             background-color: #021431; 
@@ -130,11 +132,13 @@
     const webAppUrl = "https://script.google.com/macros/s/AKfycbyXlDS04MkZMvTDvH-2yy5VXAtEGJxpwQIODz_jcyLP_lU9nx-hwNdWtTPYeP4TpOQXAg/exec";
     const hiddenSecretKey = "TEST_SECRET_KEY";
     
-    let mediaRecorder;
+    let mediaRecorder = null;
+    let audioStream = null;
     let audioChunks = [];
     let wakeLock = null;
     let finalPayloadData = null; 
     let finalMimeType = null;
+    let generatedFileName = null;
     
     const actionArea = document.getElementById('actionArea');
     const recordingArea = document.getElementById('recordingArea');
@@ -183,8 +187,66 @@
         statusText.style.color = "#00a8e1";
         finalPayloadData = null;
         finalMimeType = null;
+        generatedFileName = null;
         audioPlayback.src = "";
         fileUpload.value = "";
+    }
+
+    // --- RESAMPLE & CONVERT AUDIO TO MP3 ---
+    async function encodeAudioToMp3(rawBlob) {
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        let offlineCtx = null;
+
+        try {
+            const arrayBuffer = await rawBlob.arrayBuffer();
+            const originalAudioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+            // Resample to 44.1 kHz mono
+            const targetSampleRate = 44100;
+            offlineCtx = new OfflineAudioContext(
+                1, 
+                Math.ceil(originalAudioBuffer.duration * targetSampleRate), 
+                targetSampleRate
+            );
+
+            const source = offlineCtx.createBufferSource();
+            source.buffer = originalAudioBuffer;
+            source.connect(offlineCtx.destination);
+            source.start(0);
+
+            const resampledBuffer = await offlineCtx.startRendering();
+            const channelData = resampledBuffer.getChannelData(0);
+
+            const kbps = 128;
+            const mp3encoder = new lamejs.Mp3Encoder(1, targetSampleRate, kbps);
+            const mp3Data = [];
+
+            const samples = new Int16Array(channelData.length);
+            for (let i = 0; i < channelData.length; i++) {
+                let s = Math.max(-1, Math.min(1, channelData[i]));
+                samples[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+
+            const sampleBlockSize = 1152;
+            for (let i = 0; i < samples.length; i += sampleBlockSize) {
+                const sampleChunk = samples.subarray(i, i + sampleBlockSize);
+                const mp3buf = mp3encoder.encodeBuffer(sampleChunk);
+                if (mp3buf.length > 0) {
+                    mp3Data.push(mp3buf);
+                }
+            }
+
+            const mp3buf = mp3encoder.flush();
+            if (mp3buf.length > 0) {
+                mp3Data.push(mp3buf);
+            }
+
+            return new Blob(mp3Data, { type: 'audio/mp3' });
+        } finally {
+            if (audioContext && audioContext.state !== 'closed') {
+                await audioContext.close();
+            }
+        }
     }
 
     recordBtn.addEventListener('click', async () => {
@@ -195,10 +257,15 @@
         }
 
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ 
-    audio: { channelCount: 1 } 
-});
-            mediaRecorder = new MediaRecorder(stream);
+            audioStream = await navigator.mediaDevices.getUserMedia({ 
+                audio: { 
+                    channelCount: 1,
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: false
+                } 
+            });
+            mediaRecorder = new MediaRecorder(audioStream);
             audioChunks = [];
 
             mediaRecorder.ondataavailable = event => {
@@ -207,7 +274,43 @@
                 }
             };
 
-            mediaRecorder.onstop = prepareReview;
+            mediaRecorder.onstop = async () => {
+                const rawBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
+                
+                // Release hardware mic tracks immediately
+                if (audioStream) {
+                    audioStream.getTracks().forEach(track => track.stop());
+                    audioStream = null;
+                }
+
+                if (rawBlob.size > 10485760) {
+                    statusText.innerText = "Error: Recording is too long (over 10MB). Please record a shorter message.";
+                    statusText.style.color = "red";
+                    resetUI();
+                    return;
+                }
+
+                try {
+                    statusText.innerText = "Converting to MP3...";
+                    const mp3Blob = await encodeAudioToMp3(rawBlob);
+                    finalMimeType = "audio/mp3";
+
+                    const reader = new FileReader();
+                    reader.readAsDataURL(mp3Blob);
+                    reader.onloadend = () => {
+                        finalPayloadData = reader.result;
+                        audioPlayback.src = finalPayloadData;
+                        reviewArea.style.display = 'block';
+                        statusText.innerText = "Review your recording before submitting.";
+                        statusText.style.color = "#00a8e1";
+                    };
+                } catch (conversionErr) {
+                    console.error("MP3 conversion failed:", conversionErr);
+                    statusText.innerText = "Error converting audio. Please try again.";
+                    statusText.style.color = "red";
+                    resetUI();
+                }
+            };
 
             mediaRecorder.start();
             await requestWakeLock();
@@ -223,35 +326,15 @@
     });
 
     stopBtn.addEventListener('click', async () => {
-        mediaRecorder.stop();
-        mediaRecorder.stream.getTracks().forEach(track => track.stop()); 
+        if (mediaRecorder && mediaRecorder.state === "recording") {
+            mediaRecorder.stop();
+        }
         await releaseWakeLock();
         
         recordingArea.style.display = 'none';
         statusText.innerText = "Processing audio...";
         statusText.style.color = "#00a8e1";
     });
-
-    function prepareReview() {
-        finalMimeType = mediaRecorder.mimeType.split(';')[0];
-        const audioBlob = new Blob(audioChunks, { type: finalMimeType });
-        
-        if (audioBlob.size > 10485760) {
-            statusText.innerText = "Error: Recording is too long (over 10MB). Please record a shorter message.";
-            statusText.style.color = "red";
-            resetUI();
-            return;
-        }
-
-        const reader = new FileReader();
-        reader.readAsDataURL(audioBlob);
-        reader.onloadend = () => {
-            finalPayloadData = reader.result;
-            audioPlayback.src = finalPayloadData;
-            reviewArea.style.display = 'block';
-            statusText.innerText = "Review your recording before submitting.";
-        };
-    }
 
     fileUpload.addEventListener('change', (event) => {
         const file = event.target.files[0];
@@ -283,11 +366,17 @@
         if (!finalPayloadData) return;
 
         const userName = userNameInput.value.trim() || "Anonymous";
+        const cleanName = userName.replace(/[^a-zA-Z0-9]/g, "_");
+        
+        let ext = ".mp3";
+        if (finalMimeType.includes("wav")) ext = ".wav";
+        else if (finalMimeType.includes("mp4") || finalMimeType.includes("m4a")) ext = ".m4a";
+
         const payload = {
             audioData: finalPayloadData,
             mimeType: finalMimeType,
             secretKey: hiddenSecretKey, 
-            fileName: "CFP_Voicemail_" + userName.replace(/[^a-zA-Z0-9]/g, "_"),
+            fileName: "CFP_Voicemail_" + cleanName + "_" + Date.now() + ext,
             userNote: "Voicemail from: " + userName
         };
 
